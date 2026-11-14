@@ -152,8 +152,7 @@ const DEF = {
   issuerName: "APOLLON SOLUTION SDN BHD",
   issuerReg: "202301045964(1539879-K)",
   billTo: "KWH POWER SDN BHD\nBEN KEE\n014-9600911\n18, JLN EKOPERNIAGAAN 1/19,\nTAMAN EKO PERNIAGAAN,\n81100 JOHOR BAHRU, JOHOR.",
-  invPrefix: "INA",
-  nextNo: 12013,
+  invSeq: {},
   noteText: "Please remit payment in favour of APOLLON SOLUTION SDN BHD.\nBANK A/C NO:7091242239 OCBC BANK BERHAD",
   resDrawing: 1000,
   sedaRate: 7.5,
@@ -556,6 +555,15 @@ function qItem(a){
 }
 function closed(a){ return (a.status==="complete"||a.status==="different") && !!a.wlReceived; }
 function eligible(){ return S.apps.filter(a=>closed(a)&&(S.showInvoiced||!a.invoiceNo)); }
+/* invoice number: INVYYMM-XXXX, XXXX restarts every month */
+const todayStr=()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+function ymOf(dateStr){ const [y,m]=(dateStr||todayStr()).split("-"); return String(y).slice(2)+m; }
+function nextInvNo(dateStr){
+  const ym=ymOf(dateStr), pre=`INV${ym}-`;
+  let max=num((S.cfg.invSeq||{})[ym]);
+  S.invoices.forEach(i=>{ if((i.no||"").startsWith(pre)){ const n=parseInt(i.no.slice(pre.length),10); if(n>max) max=n; } });
+  return pre+String(max+1).padStart(4,"0");
+}
 function vInvoice(){
   const all=eligible();
   const months=[...new Set(all.map(a=>a.appliedMonth).filter(Boolean))].sort().reverse();
@@ -584,8 +592,8 @@ function vInvoice(){
   </div>
   <div class="card"><h2>2 · Invoice details</h2>
   <div class="grid2"><div>
-    <div class="row"><label class="f">Invoice #<input type="text" id="dNo" value="${esc(S.draft?.no ?? (S.cfg.invPrefix+S.cfg.nextNo))}"></label>
-    <label class="f">Invoice date<input type="date" id="dDate" value="${esc(S.draft?.date ?? new Date().toISOString().slice(0,10))}"></label></div>
+    <div class="row"><label class="f">Invoice #<input type="text" id="dNo" value="${esc(S.draft?.no ?? nextInvNo(S.draft?.date))}"></label>
+    <label class="f">Invoice date<input type="date" id="dDate" value="${esc(S.draft?.date ?? todayStr())}"></label></div>
     <label class="f" style="margin-top:12px">Bill to<textarea id="dBill" rows="6">${esc(S.draft?.billTo ?? S.cfg.billTo)}</textarea></label>
   </div><div>
     <div class="muted">Selected</div><div style="font-size:16px;font-weight:600;margin-bottom:8px">${chosen.length} application${chosen.length===1?"":"s"}</div>
@@ -689,8 +697,7 @@ function vSettings(){
   <div class="card"><h2>Invoice details</h2><div class="grid2"><div>
     <label class="f">Company name<input type="text" id="sIssuer" value="${esc(c.issuerName)}"></label>
     <label class="f" style="margin-top:10px">Registration no.<input type="text" id="sReg" value="${esc(c.issuerReg)}"></label>
-    <div class="row" style="margin-top:10px"><label class="f">Invoice prefix<input type="text" id="sPrefix" value="${esc(c.invPrefix)}" style="width:100px"></label>
-    <label class="f">Next invoice number<input type="number" id="sNext" value="${c.nextNo}" style="width:130px"></label></div>
+    <div class="note" style="margin-top:10px">Invoice numbers are automatic: <b>INVYYMM-XXXX</b> — e.g. <b>${esc(nextInvNo(todayStr()))}</b> is next for this month. The running number restarts at 0001 every month, based on the invoice date. You can still type a different number on the invoice before generating.</div>
   </div><div>
     <label class="f">Default bill to<textarea id="sBill" rows="6">${esc(c.billTo)}</textarea></label>
     <label class="f" style="margin-top:10px">Payment note<textarea id="sNote" rows="2">${esc(c.noteText)}</textarea></label>
@@ -762,7 +769,9 @@ document.addEventListener("change",e=>{
   else if(t.id==="selAll"){ const rows=[...document.querySelectorAll("[data-sel]")].map(x=>x.dataset.sel); rows.forEach(r=>t.checked?S.sel.add(r):S.sel.delete(r)); saveDraft(); render(); }
   else if(t.id==="invMonth"){ S.invMonth=t.value; saveDraft(); render(); }
   else if(t.id==="showInv"){ S.showInvoiced=t.checked; saveDraft(); render(); }
-  else if(["dNo","dDate","dBill"].includes(t.id)) saveDraft();
+  else if(t.id==="dDate"){ const oldNo=$("#dNo").value, wasAuto=/^INV\d{4}-\d{4}$/.test(oldNo);
+    saveDraft(); if(wasAuto){ S.draft.no=nextInvNo(S.draft.date); render(); } }
+  else if(["dNo","dBill"].includes(t.id)) saveDraft();
 });
 document.addEventListener("input",e=>{ const id=e.target.id||"";
   if(e.target.closest&&e.target.closest("#setForm")) S.setDirty=true;
@@ -818,7 +827,7 @@ document.addEventListener("submit",async e=>{
 });
 function readSettings(){
     readTiers();
-    return {issuerName:$("#sIssuer").value.trim(),issuerReg:$("#sReg").value.trim(),invPrefix:$("#sPrefix").value.trim(),nextNo:Math.round(num($("#sNext").value)),
+    return {issuerName:$("#sIssuer").value.trim(),issuerReg:$("#sReg").value.trim(),invSeq:S.cfg.invSeq||{},
       billTo:$("#sBill").value,noteText:$("#sNote").value,resDrawing:num($("#sResDrawing").value),sedaRate:num($("#sSedaRate").value),
       tnbRes:num($("#sTnbRes").value),tnbCom:num($("#sTnbCom").value),billAtap:num($("#sBillAtap").value),
       casTiers:[...document.querySelectorAll(".cMin")].map((el,i)=>({min:num(el.value),max:num(document.querySelectorAll(".cMax")[i].value),rate:num(document.querySelectorAll(".cRate")[i].value)})),
@@ -873,8 +882,8 @@ async function generate(){
   if(already.length && !await ask("Already invoiced",`${already.map(a=>esc(a.name)+" ("+esc(a.invoiceNo)+")").join(", ")} ${already.length>1?"are":"is"} already on an invoice. Include again?`,"Include")) return;
   await S.db.collection("invoices").doc().set(inv);
   for(const id of inv.appIds) await S.db.collection("apps").doc(id).update({invoiceNo:inv.no});
-  const m=inv.no.match(/(\d+)$/);
-  if(m && inv.no.startsWith(S.cfg.invPrefix) && +m[1]>=S.cfg.nextNo) await S.db.doc("config/main").set({...S.cfg,nextNo:+m[1]+1});
+  const m=inv.no.match(/^INV(\d{4})-(\d{4,})$/);
+  if(m && +m[2]>num((S.cfg.invSeq||{})[m[1]])) await S.db.doc("config/main").set({...S.cfg,invSeq:{...(S.cfg.invSeq||{}),[m[1]]:+m[2]}});
   S.sel.clear(); S.draft=null;
   toast(`Invoice ${inv.no} saved`);
   await downloadPDF(inv);
