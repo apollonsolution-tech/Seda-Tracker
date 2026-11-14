@@ -171,7 +171,7 @@ const DEF = {
 const S = {db:null,user:null,isOwner:false,canWrite:null,apps:[],cfg:{...DEF},invoices:[],
   tab:null, appsLoaded:false, offline:false,
   newType:"residential", diffOpen:{}, sel:new Set(), invMonth:"all", showInvoiced:false, invSearch:"",
-  appFilter:"all", draft:null, bSel:new Set(), bMonth:"all", bShow:"unbilled", bStage:"atap", bSearch:"", bRef:"", q:{}, setDirty:false};
+  appFilter:"all", draft:null, imp:null, impText:"", bSel:new Set(), bMonth:"all", bShow:"unbilled", bStage:"atap", bSearch:"", bRef:"", q:{}, setDirty:false};
 
 /* ---------- helpers ---------- */
 const $ = s=>document.querySelector(s);
@@ -260,7 +260,9 @@ const newId=()=> (crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+
 const DB={
   collection:t=>({ path:t, doc:id=>docRef(t,id||newId()), add:async d=>{ const r=docRef(t,newId()); await r.set(d); return r; },
     onSnapshot:(next,err)=>listen(t,()=>{ const docs=[...cache[t].keys()].map(id=>snapDoc(t,id)); next({docs,size:docs.length,empty:!docs.length,metadata:{fromCache:false}}); },err) }),
-  doc:p=>{ const [t,id]=p.split("/"); return docRef(t,id); }
+  doc:p=>{ const [t,id]=p.split("/"); return docRef(t,id); },
+  bulkAdd: async(t,arr)=>{ for(let i=0;i<arr.length;i+=200){ const rows=arr.slice(i,i+200).map(d=>({id:newId(),data:d}));
+    const {error}=await sb.from(t).insert(rows); if(error) throw wrapErr(error); } refresh(t); }
 };
 const USER={ isOwner:()=>ME.role==="owner", can:async()=>true, id:async()=>ME.id };
 const DL={ save:async({filename,data})=>{ const blob=data instanceof Blob?data:new Blob([data]); const url=URL.createObjectURL(blob);
@@ -405,6 +407,73 @@ function statusTag(a){
   return atapTag(a)+" "+wlTag(a);
 }
 
+/* ---------- bulk import of already-completed applications ---------- */
+function parseDate(v){
+  v=String(v||"").trim(); if(!v) return null;
+  let m=v.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);           // 13/11/2026 (day first)
+  if(m){ let y=+m[3]; if(y<100) y+=2000; const d=new Date(y,+m[2]-1,+m[1]); return isNaN(d)?null:d.getTime(); }
+  m=v.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);                  // 2026-11-13
+  if(m){ const d=new Date(+m[1],+m[2]-1,+m[3]); return isNaN(d)?null:d.getTime(); }
+  m=v.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,})[\s\-,]*(\d{2,4})$/);           // 13-Nov-2026 / 13 Nov 2026
+  if(m){ const mi=MON.findIndex(x=>m[2].slice(0,3).toLowerCase()===x.toLowerCase()); let y=+m[3]; if(y<100) y+=2000; if(mi>=0) return new Date(y,mi,+m[1]).getTime(); }
+  m=v.match(/^([A-Za-z]{3,})[\s\-,]*(\d{4})$/);                              // Nov 2026
+  if(m){ const mi=MON.findIndex(x=>m[1].slice(0,3).toLowerCase()===x.toLowerCase()); if(mi>=0) return new Date(+m[2],mi,15).getTime(); }
+  return null;
+}
+function parseImport(text){
+  const lines=String(text||"").split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const existing=new Set(S.apps.map(a=>a.name.trim().toUpperCase()));
+  const seen=new Set(); const rows=[];
+  lines.forEach((line,i)=>{
+    const c=(line.includes("\t")?line.split("\t"):line.split(",")).map(x=>x.trim());
+    if(i===0 && /name/i.test(c[0]||"") ) return;                              // header row
+    const r={line:i+1,name:c[0]||"",errs:[],warns:[]};
+    const t=(c[1]||"").toLowerCase();
+    r.type = /^(c|com|commercial|c&i|ci|c & i)/.test(t)?"commercial": /^(r|res|residential)/.test(t)?"residential":null;
+    r.kwac = c[2]===""||c[2]==null?NaN:parseFloat(String(c[2]).replace(/[^\d.]/g,""));
+    r.kwp  = c[3]?parseFloat(String(c[3]).replace(/[^\d.]/g,"")):null;
+    r.date = c[4]?parseDate(c[4]):Date.now(); r.dateRaw=c[4]||"";
+    const tp=(c[5]||"").toLowerCase(); r.tnbPaidBy = /client|cust/.test(tp)?"client":"apollon";
+    r.tnbAmount = c[6]!==undefined&&c[6]!==""?parseFloat(String(c[6]).replace(/[^\d.]/g,"")):null;
+    if(!r.name) r.errs.push("no name");
+    if(!r.type) r.errs.push("type must be Residential or Commercial");
+    if(!(r.kwac>0)) r.errs.push("kWac missing");
+    if(c[4]&&r.date==null) r.errs.push(`can't read date "${c[4]}"`);
+    if(r.type==="commercial"&&r.kwac>0&&stApplies(r.kwac,S.cfg)&&!(r.kwp>0)) r.warns.push("kWp needed for ST License — add later with Edit");
+    const key=r.name.toUpperCase();
+    if(existing.has(key)) r.warns.push("same name already in the app");
+    if(seen.has(key)) r.warns.push("listed twice in this paste");
+    seen.add(key); rows.push(r);
+  });
+  return rows;
+}
+function vImport(){
+  const rows=S.imp; const ok=rows?rows.filter(r=>!r.errs.length):[];
+  return `<div class="card"><h2>Import completed applications</h2>
+  <p class="muted" style="margin-top:-4px">For applications where <b>ATAP Application</b> and <b>TNB Welcome Letter</b> are both already done. They go straight to <b>Closed</b>, ready to invoice. Copy the rows from Excel and paste below — columns in this order:</p>
+  <div style="overflow-x:auto;margin-bottom:10px"><table style="font-size:12px"><thead><tr><th>Name</th><th>Type</th><th>kWac</th><th>kWp</th><th>Date applied</th><th>TNB paid by</th><th>TNB amount</th></tr></thead>
+  <tbody><tr><td>HENG CHOW LOON</td><td>Residential</td><td>6.5</td><td></td><td>13/10/2026</td><td>Apollon</td><td>10</td></tr>
+  <tr><td>LINGJACK ENGINEERING</td><td>Commercial</td><td>96</td><td>120</td><td>02/11/2026</td><td>Apollon</td><td>920</td></tr></tbody></table>
+  <div class="muted" style="font-size:12px;margin-top:4px">Name, Type and kWac are required. kWp is needed for commercial 72–1,000 kWac. Date applied decides the month filter (blank = today). TNB paid by: Apollon or Client (blank = Apollon). TNB amount blank = default (RM${money(S.cfg.tnbRes)} residential).</div></div>
+  <textarea id="impText" rows="6" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px" placeholder="Paste rows from Excel here">${esc(S.impText)}</textarea>
+  <div class="row" style="margin-top:10px"><button class="btn ghost" data-act="impPreview">Preview</button>
+  ${rows?`<button class="btn" data-act="impGo" ${ok.length?"":"disabled"}>Import ${ok.length} application${ok.length===1?"":"s"}</button><button class="btn ghost sm" data-act="impClear">Clear</button>`:""}</div>
+  ${rows?`<div style="overflow-x:auto;margin-top:12px"><table><thead><tr><th>#</th><th>Name</th><th>Type</th><th class="n">kWac</th><th class="n">kWp</th><th>Applied</th><th>TNB</th><th>Check</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr style="${r.errs.length?"background:var(--red-bg)":""}"><td class="muted">${r.line}</td><td><b>${esc(r.name)}</b></td><td>${r.type?typeTag(r.type):"—"}</td><td class="n">${r.kwac>0?r.kwac:"—"}</td><td class="n">${r.kwp||"—"}</td>
+  <td>${r.date?fmtDate(r.date):"—"}</td><td>${r.tnbPaidBy==="client"?"Client":`Apollon (RM${money(r.tnbAmount??(r.type==="commercial"?S.cfg.tnbCom:S.cfg.tnbRes))})`}</td>
+  <td>${r.errs.length?`<span style="color:var(--red);font-weight:600">✕ ${esc(r.errs.join("; "))}</span>`:r.warns.length?`<span style="color:#a4621a">⚠ ${esc(r.warns.join("; "))}</span>`:`<span style="color:#3d7311">✓ OK</span>`}</td></tr>`).join("")}
+  </tbody></table></div>
+  <div class="muted" style="font-size:12px;margin-top:6px">${ok.length} ready · ${rows.length-ok.length} with errors (skipped — fix them in Excel and paste again)</div>`:""}
+  </div>`;
+}
+async function runImport(){
+  const ok=(S.imp||[]).filter(r=>!r.errs.length); if(!ok.length) return;
+  const now=Date.now();
+  const docs=ok.map(r=>({type:r.type,name:r.name,kwac:r.kwac,kwp:r.kwp||null,status:"complete",appliedKwac:r.kwac,appliedAt:r.date,appliedMonth:monthKey(r.date),
+    diffAck:false,adminNote:"",wlReceived:true,wlAt:r.date,tnbPaidBy:r.tnbPaidBy,tnbAmount:r.tnbAmount,createdAt:now,invoiceNo:null,imported:true}));
+  if(S.db.bulkAdd) await S.db.bulkAdd("apps",docs); else for(const d of docs) await S.db.collection("apps").add(d);
+  S.imp=null; S.impText=""; render(); toast(`Imported ${docs.length} completed application${docs.length===1?"":"s"}`);
+}
 function vNew(){
   const recent=S.apps.slice(0,8);
   const com=S.newType==="commercial";
@@ -422,6 +491,7 @@ function vNew(){
     ? (S.cfg.comTiers&&S.cfg.comTiers.length?`Commercial: drawing fee by kWac table · CAS charges by kWac band · ST License RM${S.cfg.stPerKwp}/kWp + RM${money(S.cfg.stProc)} processing (annual) for ${S.cfg.stMin}–${S.cfg.stMax} kWac.`:"⚠ Commercial drawing rates aren't set yet — add them in <b>Rates & settings</b> before invoicing.")
     : `Residential: Drawing & Endorsement RM${money(S.cfg.resDrawing)} · SEDA fee kWac × RM${S.cfg.sedaRate}.`}</p>
   </div>
+  ${vImport()}
   <div class="card"><h2>Recently keyed in</h2>${recent.length?appTable(recent,false):`<div class="empty">No applications yet.</div>`}</div>`;
 }
 
@@ -643,6 +713,9 @@ document.addEventListener("click",async e=>{
     case "del": if(await ask("Delete application?",`Remove <b>${esc(a.name)}</b>? This can't be undone.`,"Delete",true)){ await ref.delete(); toast("Deleted"); } break;
     case "edit": editApp(a); break;
     case "logout": await sb.auth.signOut(); location.reload(); break;
+    case "impPreview": S.impText=$("#impText").value; S.imp=parseImport(S.impText); if(!S.imp.length) toast("Nothing to import — paste rows first"); render(); break;
+    case "impClear": S.imp=null; S.impText=""; render(); break;
+    case "impGo": { const n=(S.imp||[]).filter(r=>!r.errs.length).length; if(await ask(`Import ${n} application${n===1?"":"s"}?`,"They'll be added as closed cases (ATAP done, Welcome Letter received), ready to invoice.","Import")) await runImport(); break; }
     case "bClear": S.bSel.clear(); render(); break;
     case "bStage": S.bStage=t.dataset.v; S.bSel.clear(); S.bMonth="all"; render(); break;
     case "unbill": if(await ask("Unmark as billed?",`Remove the ${STAGE[S.bStage||"atap"]} billing marks from <b>${esc(a.name)}</b>?`,"Unmark")){ await ref.update((S.bStage||"atap")==="wl"?{billedWl:[]}:{billedAtap:[],billedRefs:[]}); toast("Unmarked"); } break;
@@ -695,6 +768,7 @@ document.addEventListener("input",e=>{ const id=e.target.id||"";
   if(e.target.closest&&e.target.closest("#setForm")) S.setDirty=true;
   if(/^(pt|ak|an)_/.test(id)){ S.q[id]=e.target.value; if(/^ak_/.test(id)) render(); }
   if(id==="bRef") S.bRef=e.target.value;
+  if(id==="impText") S.impText=e.target.value;
   if(id==="bSearch"){ S.bSearch=e.target.value; render(); }
   if(e.target.id==="invSearch"){ S.invSearch=e.target.value; saveDraft(); render(); } });
 async function markBilled(){
