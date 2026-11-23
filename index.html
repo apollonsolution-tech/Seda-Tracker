@@ -58,6 +58,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 .s-pending{background:var(--amber-bg);color:#8a6512}
 .s-complete{background:var(--green-bg);color:#3d7311}
 .s-different{background:var(--red-bg);color:var(--red)}
+.t-ccc{background:#fff1c2;color:#7a5a00;border:1px solid #f0d56b}
 .s-pay{background:#fde8d4;color:#9a4a0b}
 .s-verify{background:var(--blue-bg);color:#245a80}
 .s-inv{background:#eceff1;color:#4a5458}
@@ -205,6 +206,11 @@ function comDrawingRate(kw,cfg){
 }
 function tnbAmt(a,cfg=S.cfg){ return num(a.tnbAmount ?? (a.type==="commercial"?cfg.tnbCom:cfg.tnbRes)); }
 function tnbBy(a){ return a.tnbPaidBy || "apollon"; }
+const isCCC=a=>!!a.cccApp;                                  // owner sent this case for CCC Application
+const withCCC=a=>!!a.cccApp || (a.ccc && a.status==="complete");   // shows "Approved, with CCC"
+const invName=a=>a.name.toUpperCase()+(isCCC(a)?" (CCC)":"");
+const ROUND_FIELDS=["status","appliedKwac","appliedAt","appliedMonth","diffAck","adminNote","ccc","atapPaid","atapPaidAt","atapApproved","atapApprovedAt",
+  "tnbSubmitted","tnbSubmittedAt","tnbPaid","tnbPaidAt","wlReceived","wlAt","billedAtap","billedWl","billedRefs","invoiceNo","cccApp"];
 function refsOf(a,st){ return st==="wl" ? (a.billedWl||[]) : (a.billedAtap || a.billedRefs || []); }
 function casRate(kw,cfg){
   // first band: min <= kWac <= max ; later bands: min < kWac <= max
@@ -433,7 +439,7 @@ function atapCell(a,owner){
   const diff=a.status==="different"?` <span class="tag s-different">different kWac${a.diffAck?" (noted)":""}</span>`:"";
   if(st==="atap_pay") return `<span class="tag s-pay">Waiting for Fee Payment</span>${diff}${owner?`<div>${payBox(a,"atap")}</div>`:""}`;
   if(st==="atap_verify") return `<span class="tag s-verify">Waiting for Verification</span>${diff}${owner?`<div>${payBox(a,"atap")}</div>`:""}`;
-  return `<span class="tag s-complete">Approved ✓ ${dt(a.atapApprovedAt)}</span>${diff}`;
+  return `<span class="tag s-complete">Approved${withCCC(a)?", with CCC":""} ✓ ${dt(a.atapApprovedAt)}</span>${diff}`;
 }
 function tnbCell(a,owner){
   const st=stage(a);
@@ -544,11 +550,13 @@ function vNew(){
 
 function appTable(list,actions=true){
   return `<div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Applicant</th><th class="n">Keyed kWac</th><th class="n">Applied kWac</th><th>ATAP Application</th><th>TNB Application</th><th>TNB metering</th><th>Billing</th><th>Added</th>${actions?"<th></th>":""}</tr></thead><tbody>
-  ${list.map(a=>`<tr><td>${typeTag(a.type)}</td><td style="min-width:150px"><b>${esc(a.name)}</b>${a.adminNote?`<div class="muted" style="font-size:12px">Note: ${esc(a.adminNote)}</div>`:""}${a.invoiceNo?`<div><span class="tag s-inv">Invoiced ${esc(a.invoiceNo)}</span></div>`:""}</td>
+  ${list.map(a=>`<tr><td>${typeTag(a.type)}</td><td style="min-width:150px"><b>${esc(a.name)}</b>${isCCC(a)?` <span class="tag t-ccc">CCC Application</span>`:""}${a.adminNote?`<div class="muted" style="font-size:12px">Note: ${esc(a.adminNote)}</div>`:""}${a.invoiceNo?`<div><span class="tag s-inv">Invoiced ${esc(a.invoiceNo)}</span></div>`:""}</td>
   <td class="n">${a.kwac}</td><td class="n">${a.status==="pending"?"—":(a.appliedKwac??a.kwac)}</td><td>${atapCell(a,actions&&S.isOwner)}</td><td>${tnbCell(a,actions&&S.isOwner)}</td>
   <td>${actions?tnbEditor(a):tnbLabel(a)}</td><td>${billTags(a)||'<span class="muted">—</span>'}</td>
   <td class="muted" style="white-space:nowrap">${a.createdAt?fmtDate(a.createdAt):""}</td>
   ${actions?`<td style="white-space:nowrap">${a.status==="different"&&!a.diffAck?`<button class="btn sm warn" data-act="ack" data-id="${a.id}">Acknowledge</button> `:""}
+   ${closed(a)&&S.isOwner?`<button class="btn sm" data-act="cccApp" data-id="${a.id}" style="background:#7a5a00;border-color:#7a5a00">CCC Application</button> `:""}
+   ${isCCC(a)&&stage(a)==="atap_submit"&&(a.rounds||[]).length&&S.isOwner?`<button class="btn sm ghost" data-act="cccUndo" data-id="${a.id}">Cancel CCC</button> `:""}
    ${!a.invoiceNo?`<button class="btn sm ghost" data-act="edit" data-id="${a.id}">Edit</button> <button class="btn sm danger" data-act="del" data-id="${a.id}">Delete</button>`:""}</td>`:""}</tr>`).join("")}
   </tbody></table></div>`;
 }
@@ -557,11 +565,12 @@ function vApps(){
   const f=S.appFilter;
   const st=k=>a=>!a.invoiceNo&&stage(a)===k;
   const F={all:a=>true,topay:a=>!a.invoiceNo&&OWNER_STEPS.includes(stage(a)),atap_submit:st("atap_submit"),atap_verify:st("atap_verify"),
-    tnb_submit:st("tnb_submit"),tnb_wl:st("tnb_wl"),closed:st("closed"),different:a=>a.status==="different",invoiced:a=>!!a.invoiceNo};
+    tnb_submit:st("tnb_submit"),tnb_wl:st("tnb_wl"),closed:st("closed"),ccc:a=>isCCC(a),different:a=>a.status==="different",invoiced:a=>!!a.invoiceNo};
   const list=S.apps.filter(F[f]||F.all);
-  const btns=[["all","All"],["topay","💰 Fees to pay"],["atap_submit","ATAP to submit"],["atap_verify","ATAP verifying"],["tnb_submit","TNB to submit"],["tnb_wl","Pending Welcome Letter"],["closed","Complete"],["different","Different kWac"],["invoiced","Invoiced"]];
+  const btns=[["all","All"],["topay","💰 Fees to pay"],["atap_submit","ATAP to submit"],["atap_verify","ATAP verifying"],["tnb_submit","TNB to submit"],["tnb_wl","Pending Welcome Letter"],["closed","Complete"],["ccc","CCC Application"],["different","Different kWac"],["invoiced","Invoiced"]];
   return `<div class="card"><h2 style="margin:0 0 10px">All applications</h2>
   <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">${btns.map(([k,l])=>`<button data-act="appFilter" data-v="${k}" class="${f===k?"on":""}">${l} (${S.apps.filter(F[k]).length})</button>`).join("")}</div>
+  ${f==="closed"?`<p class="muted" style="margin-top:-4px">Press <b>CCC Application</b> on a case to send it back through ATAP Application and TNB Application for CCC.</p>`:""}
   ${f==="topay"?`<p class="muted" style="margin-top:-4px">Tick <b>Fee paid</b> once you've paid — the admin then sees it as <b>Waiting for Verification</b> (ATAP) or <b>Pending Welcome Letter</b> (TNB).</p>`:""}
   ${list.length?appTable(list):`<div class="empty">Nothing here.</div>`}</div>`;
 }
@@ -591,12 +600,13 @@ function qItem(a){
   const opt=(val,label)=>`<button type="button" class="opt ${k===val?"on":""}" data-act="qPick" data-id="${a.id}" data-g="k" data-v="${val}" ${ro?"disabled":""}>${k===val?"●":"○"} ${label}</button>`;
   const box=(field,label,checked,dis)=>`<label class="chk"><input type="checkbox" data-step="${field}" data-id="${a.id}" ${checked?"checked":""} ${ro||dis?"disabled":""}> ${label}</label>`;
   const chip=(t,c)=>`<span class="tag ${c}" style="font-size:12px">${t}</span>`;
-  const kwInfo = a.status==="complete"?`Same kWac (${a.appliedKwac??a.kwac})`:a.status==="different"?`Different kWac — applied ${a.appliedKwac}`:"";
+  const kwInfo = a.status==="complete"?`Same kWac (${a.appliedKwac??a.kwac})${a.ccc?" · CCC":""}`:a.status==="different"?`Different kWac — applied ${a.appliedKwac}`:"";
   let atapRow;
   if(st==="atap_submit"){
     atapRow=`<div class="actions" style="margin-top:0">${opt("same","Same kWac")}${opt("diff","Different kWac")}
       ${k==="diff"?`<label class="chk muted" style="font-size:13px">Applied kWac <input type="number" id="ak_${a.id}" step="0.01" min="0" value="${esc(akv)}" style="width:100px"></label>
       <input type="text" id="an_${a.id}" value="${esc(S.q["an_"+a.id]??"")}" placeholder="Reason (optional)" style="flex:1;min-width:160px">`:""}
+      ${k==="same"?`<label class="chk" style="font-size:13px"><input type="checkbox" id="cc_${a.id}" ${S.q["cc_"+a.id]?"checked":""} ${ro?"disabled":""}> CCC</label>`:""}
       <button class="btn green sm" data-act="atapSave" data-id="${a.id}" ${!kwOk||ro?"disabled":""}>Submitted</button></div>`;
   } else {
     const parts=[chip("✓ Submitted · "+kwInfo, a.status==="different"?"s-different":"s-complete"),`<span class="muted" style="font-size:12px">${dt(a.appliedAt)}</span>`];
@@ -611,7 +621,7 @@ function qItem(a){
   else if(st==="tnb_pay") tnbRow=`${box("tnbSubmitted",`Submitted ${dt(a.tnbSubmittedAt)}`,true,false)} ${chip("Waiting for Fee Payment","s-pay")}`;
   else tnbRow=`${chip("✓ Submitted "+dt(a.tnbSubmittedAt),"s-complete")} ${chip("Pending Welcome Letter","s-verify")} ${box("wlReceived","Received Welcome Letter",false,false)}`;
   return `<div class="qitem" data-q="${a.id}">
-    <div class="top">${typeTag(a.type)}<span class="name">${esc(a.name)}</span><span class="muted">Keyed in: <b style="color:var(--ink)">${a.kwac} kWac</b>${a.kwp?` · ${a.kwp} kWp`:""}</span><span class="muted" style="margin-left:auto;font-size:12px">Added ${dt(a.createdAt)}</span></div>
+    <div class="top">${typeTag(a.type)}<span class="name">${esc(a.name)}</span>${isCCC(a)?`<span class="tag t-ccc">CCC Application</span>`:""}<span class="muted">Keyed in: <b style="color:var(--ink)">${a.kwac} kWac</b>${a.kwp?` · ${a.kwp} kWp`:""}</span><span class="muted" style="margin-left:auto;font-size:12px">Added ${dt(a.createdAt)}</span></div>
     <div class="qgrid">
       <div class="qlbl">1. ATAP Application</div>${atapRow}
       <div class="qlbl">2. TNB Application</div><div class="actions" style="margin-top:0">${tnbRow}</div>
@@ -798,10 +808,22 @@ document.addEventListener("click",async e=>{
       if(k!=="same"&&k!=="diff"){toast("Pick same or different kWac");return}
       if(k==="diff"&&(S.q["ak_"+id]==null||S.q["ak_"+id]===""||ak===num(a.kwac))){toast("Enter the kWac you applied");return}
       const now=Date.now();
-      await ref.update({status:k==="diff"?"different":"complete",appliedKwac:ak,appliedAt:now,appliedMonth:monthKey(now),diffAck:false,adminNote:k==="diff"?(S.q["an_"+id]||"").trim():""});
-      ["k_","ak_","an_"].forEach(x=>delete S.q[x+id]);
+      await ref.update({status:k==="diff"?"different":"complete",appliedKwac:ak,appliedAt:now,appliedMonth:monthKey(now),diffAck:false,adminNote:k==="diff"?(S.q["an_"+id]||"").trim():"",ccc:k==="same"&&!!S.q["cc_"+id]});
+      ["k_","ak_","an_","cc_"].forEach(x=>delete S.q[x+id]);
       toast(k==="diff"?"ATAP submitted — owner alerted about the kWac difference":"ATAP submitted — waiting for fee payment"); break; }
-    case "atapReset": if(await ask("Change ATAP answer?",`Clear the ATAP submission for <b>${esc(a.name)}</b>?`,"Change")){ await ref.update({status:"pending",appliedKwac:null,appliedAt:null,appliedMonth:null,diffAck:false,adminNote:""}); } break;
+    case "atapReset": if(await ask("Change ATAP answer?",`Clear the ATAP submission for <b>${esc(a.name)}</b>?`,"Change")){ await ref.update({status:"pending",appliedKwac:null,appliedAt:null,appliedMonth:null,diffAck:false,adminNote:"",ccc:false}); } break;
+    case "cccApp": {
+      if(!await ask("Start CCC Application?",`<b>${esc(a.name)}</b> goes back to the admin queue and runs through <b>ATAP Application</b> and <b>TNB Application</b> again (including your fee-paid ticks). Its status will show <b>Approved, with CCC</b> once ATAP is approved.<br><br>The completed round${a.invoiceNo?` (invoice ${esc(a.invoiceNo)})`:""} and its billing marks are kept in the history, and the CCC round can be invoiced and billed separately.`,"Start CCC Application")) break;
+      const snap={round:(a.rounds||[]).length+1,closedAt:Date.now()}; ROUND_FIELDS.forEach(f=>{ if(a[f]!==undefined) snap[f]=a[f]; });
+      await ref.update({rounds:[...(a.rounds||[]),snap],cccApp:true,status:"pending",appliedKwac:null,appliedAt:null,appliedMonth:null,diffAck:false,adminNote:"",ccc:false,
+        atapPaid:false,atapPaidAt:null,atapApproved:false,atapApprovedAt:null,tnbSubmitted:false,tnbSubmittedAt:null,tnbPaid:false,tnbPaidAt:null,wlReceived:false,wlAt:null,
+        billedAtap:[],billedWl:[],billedRefs:[],invoiceNo:null});
+      toast("CCC Application started — it's back in the admin queue"); break; }
+    case "cccUndo": {
+      if(!await ask("Cancel CCC Application?",`<b>${esc(a.name)}</b> goes back to its completed state.`,"Cancel CCC")) break;
+      const rs=[...(a.rounds||[])], last=rs.pop(); if(!last) break;
+      const back={rounds:rs}; ROUND_FIELDS.forEach(f=>{ back[f]=last[f]===undefined?null:last[f]; });
+      await ref.update(back); toast("CCC Application cancelled"); break; }
     case "reopen": if(await ask("Reopen case?",`<b>${esc(a.name)}</b> goes back to Pending Welcome Letter.`,"Reopen")){ await ref.update({wlReceived:false,wlAt:null}); } break;
     case "selMonth": eligible().filter(x=>x.appliedMonth===S.invMonth).forEach(x=>S.sel.add(x.id)); render(); break;
     case "clearSel": S.sel.clear(); render(); break;
@@ -825,6 +847,7 @@ document.addEventListener("change",e=>{
   if(t.dataset.role){ sb.from("profiles").update({role:t.value}).eq("id",t.dataset.role).then(({error})=>{ if(error){toast("Couldn't change role");console.error(error);} else toast("Access updated"); loadUsers(); }); return; }
   if(t.dataset.tnbsel){ S.db.collection("apps").doc(t.dataset.tnbsel).update({tnbPaidBy:t.value}).then(()=>toast("TNB metering updated")).catch(dbErr); return; }
   if(t.dataset.tnbamt){ if(t.value===""){toast("Enter an amount");return} S.db.collection("apps").doc(t.dataset.tnbamt).update({tnbAmount:num(t.value)}).then(()=>toast("TNB amount saved")).catch(dbErr); return; }
+  if(/^cc_/.test(t.id||"")){ S.q[t.id]=t.checked; return; }
   if(t.dataset.step||t.dataset.pay){
     const field=t.dataset.step || (t.dataset.pay==="atap"?"atapPaid":"tnbPaid");
     const atField={atapApproved:"atapApprovedAt",tnbSubmitted:"tnbSubmittedAt",wlReceived:"wlAt",atapPaid:"atapPaidAt",tnbPaid:"tnbPaidAt"}[field];
@@ -931,15 +954,15 @@ function buildDraft(){
   saveDraft();
   const chosen=S.apps.filter(a=>S.sel.has(a.id)).sort((a,b)=>(a.appliedAt||0)-(b.appliedAt||0));
   const rows=chosen.map(a=>({a,p:price(a)}));
-  const L=(get)=>rows.filter(r=>get(r)>0).map(r=>({name:r.a.name.toUpperCase(),unit:get(r),qty:1,amt:get(r)}));
+  const L=(get)=>rows.filter(r=>get(r)>0).map(r=>({name:invName(r.a),unit:get(r),qty:1,amt:get(r)}));
   const sections=[
     {title:"Drawing & Endorsement for SEDA application submission",lines:L(r=>r.p.drawing)},
     {title:"SEDA application FEE",lines:L(r=>r.p.seda)},
     {title:"TNB Metering charges",lines:L(r=>r.p.tnb)},
     {title:"CAS Charges",lines:L(r=>r.p.cas)},
     {title:"ST License (annual)",lines:rows.filter(r=>r.p.stFee>0||r.p.stProc>0).flatMap(r=>[
-      {name:r.a.name.toUpperCase()+` (${r.p.kwp} kWp × RM${S.cfg.stPerKwp})`,unit:num(S.cfg.stPerKwp),qty:r.p.kwp,amt:r.p.stFee},
-      {name:r.a.name.toUpperCase()+" (processing fee)",unit:r.p.stProc,qty:1,amt:r.p.stProc}].filter(l=>l.amt>0))}].filter(s=>s.lines.length);
+      {name:invName(r.a)+` (${r.p.kwp} kWp × RM${S.cfg.stPerKwp})`,unit:num(S.cfg.stPerKwp),qty:r.p.kwp,amt:r.p.stFee},
+      {name:invName(r.a)+" (processing fee)",unit:r.p.stProc,qty:1,amt:r.p.stProc}].filter(l=>l.amt>0))}].filter(s=>s.lines.length);
   const total=r2(rows.reduce((s,r)=>s+r.p.total,0));
   const d=S.draft.date?new Date(S.draft.date+"T00:00:00"):new Date();
   return {no:S.draft.no.trim(),dateTs:d.getTime(),billTo:S.draft.billTo,issuerName:S.cfg.issuerName,issuerReg:S.cfg.issuerReg,noteText:S.cfg.noteText,
