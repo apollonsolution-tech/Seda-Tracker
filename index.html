@@ -27,7 +27,7 @@ nav{display:flex;gap:4px;padding:0 20px;background:var(--teal-2);overflow-x:auto
 nav button{background:none;border:0;color:#d6e6e3;padding:11px 14px;font:inherit;font-weight:500;cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap}
 nav button.on{color:#fff;border-bottom-color:var(--gold)}
 nav .badge{background:var(--red);color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:5px}
-main{max-width:1180px;margin:0 auto;padding:20px}
+main{max-width:1440px;margin:0 auto;padding:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
 .card h2{font-size:15px;margin:0 0 12px}
 .muted{color:var(--muted)}
@@ -58,6 +58,8 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 .s-pending{background:var(--amber-bg);color:#8a6512}
 .s-complete{background:var(--green-bg);color:#3d7311}
 .s-different{background:var(--red-bg);color:var(--red)}
+.s-pay{background:#fde8d4;color:#9a4a0b}
+.s-verify{background:var(--blue-bg);color:#245a80}
 .s-inv{background:#eceff1;color:#4a5458}
 .alert{background:var(--red-bg);border:1px solid #f0bcb3;color:#7d2416;border-radius:10px;padding:12px 14px;margin-bottom:16px}
 .alert b{color:var(--red)}
@@ -355,10 +357,11 @@ async function boot(){
 /* ---------- render ---------- */
 function tabs(){
   const diff=S.apps.filter(a=>a.status==="different"&&!a.diffAck).length;
-  const pend=S.apps.filter(a=>!closed(a)&&!a.invoiceNo).length;
+  const pend=S.apps.filter(a=>!a.invoiceNo&&ADMIN_STEPS.includes(stage(a))).length;
+  const toPay=S.apps.filter(a=>!a.invoiceNo&&OWNER_STEPS.includes(stage(a))).length;
   const dup=S.apps.filter(a=>refsOf(a,"atap").length>1||refsOf(a,"wl").length>1).length;
   if(!S.isOwner) return [["queue",`Applications to submit${pend?` <span class="badge">${pend}</span>`:""}`]];
-  return [["new","New application"],["apps",`All applications${diff?` <span class="badge">${diff}</span>`:""}`],
+  return [["new","New application"],["apps",`All applications${toPay?` <span class="badge" style="background:#c8661b" title="Fees to pay">${toPay}</span>`:""}${diff?` <span class="badge">${diff}</span>`:""}`],
     ["queue",`Admin queue${pend?` <span class="badge" style="background:#8a6512">${pend}</span>`:""}`],
     ["billing",`Billing check${dup?` <span class="badge">${dup}</span>`:""}`],["invoice","Generate invoice"],["history","Invoices"],["settings","Rates & settings"],["users",`Users${USERS.filter(u=>u.role==="pending").length?` <span class="badge">${USERS.filter(u=>u.role==="pending").length}</span>`:""}`]];
 }
@@ -391,19 +394,64 @@ function tnbEditor(a){
   return `<div style="display:flex;gap:6px;align-items:center;white-space:nowrap"><select data-tnbsel="${a.id}" style="padding:5px 6px;font-size:12px"><option value="apollon" ${ap?"selected":""}>Paid by Apollon</option><option value="client" ${!ap?"selected":""}>Paid by Client</option></select>
   ${ap?`<span class="muted" style="font-size:12px">RM</span><input type="number" step="0.01" min="0" id="tA_${a.id}" data-tnbamt="${a.id}" value="${tnbAmt(a)}" style="width:80px;padding:5px 6px;font-size:12px">`:""}</div>`;
 }
-function atapTag(a){
-  if(a.status==="complete") return `<span class="tag s-complete">ATAP ✓</span>`;
-  if(a.status==="different") return `<span class="tag s-different">ATAP ✓ · different kWac${a.diffAck?" (noted)":""}</span>`;
-  return `<span class="tag s-pending">ATAP pending</span>`;
+/* ---------- step-by-step flow ----------
+   ATAP:  submit (admin) -> fee paid (owner) -> approved (admin)
+   TNB :  submitted (admin) -> fee paid (owner) -> welcome letter received (admin) */
+function flag(a,k){
+  if(a[k]!==undefined && a[k]!==null) return !!a[k];
+  // records made before step tracking: a received welcome letter means every step was done
+  if(k==="atapPaid"||k==="atapApproved"||k==="tnbSubmitted"||k==="tnbPaid") return a.status!=="pending" && !!a.wlReceived;
+  return false;
 }
-function wlTag(a){ return a.wlReceived?`<span class="tag s-complete">Letter ✓ ${a.wlAt?fmtDate(a.wlAt):""}</span>`:`<span class="tag s-pending">Letter pending</span>`; }
+function stage(a){
+  if(a.status==="pending") return "atap_submit";
+  if(!flag(a,"atapPaid")) return "atap_pay";
+  if(!flag(a,"atapApproved")) return "atap_verify";
+  if(!flag(a,"tnbSubmitted")) return "tnb_submit";
+  if(!flag(a,"tnbPaid")) return "tnb_pay";
+  if(!a.wlReceived) return "tnb_wl";
+  return "closed";
+}
+const STEP={
+  atap_submit:["ATAP: Waiting submission","s-pending"],
+  atap_pay:["ATAP: Waiting for Fee Payment","s-pay"],
+  atap_verify:["ATAP: Waiting for Verification","s-verify"],
+  tnb_submit:["TNB: Waiting submission","s-pending"],
+  tnb_pay:["TNB: Waiting for Fee Payment","s-pay"],
+  tnb_wl:["TNB: Pending Welcome Letter","s-verify"],
+  closed:["Complete","s-complete"]};
+const ADMIN_STEPS=["atap_submit","atap_verify","tnb_submit","tnb_wl"], OWNER_STEPS=["atap_pay","tnb_pay"];
+function stepTag(a){ const [l,c]=STEP[stage(a)]; return `<span class="tag ${c}">${l}</span>`; }
+const dt=ts=>ts?fmtDate(ts):"";
+function payBox(a,which){ // owner's fee-paid tick
+  const k=which==="atap"?"atapPaid":"tnbPaid", locked=which==="atap"?flag(a,"atapApproved"):!!a.wlReceived;
+  return `<label class="chk" style="font-size:12px;margin-top:4px"><input type="checkbox" data-pay="${which}" data-id="${a.id}" ${flag(a,k)?"checked":""} ${locked||a.invoiceNo?"disabled":""}> Fee paid</label>`;
+}
+function atapCell(a,owner){
+  const st=stage(a);
+  if(st==="atap_submit") return `<span class="tag s-pending">Waiting submission</span>`;
+  const diff=a.status==="different"?` <span class="tag s-different">different kWac${a.diffAck?" (noted)":""}</span>`:"";
+  if(st==="atap_pay") return `<span class="tag s-pay">Waiting for Fee Payment</span>${diff}${owner?`<div>${payBox(a,"atap")}</div>`:""}`;
+  if(st==="atap_verify") return `<span class="tag s-verify">Waiting for Verification</span>${diff}${owner?`<div>${payBox(a,"atap")}</div>`:""}`;
+  return `<span class="tag s-complete">Approved ✓ ${dt(a.atapApprovedAt)}</span>${diff}`;
+}
+function tnbCell(a,owner){
+  const st=stage(a);
+  if(["atap_submit","atap_pay","atap_verify"].includes(st)) return `<span class="muted" style="font-size:12px">After ATAP approval</span>`;
+  if(st==="tnb_submit") return `<span class="tag s-pending">Waiting submission</span>`;
+  if(st==="tnb_pay") return `<span class="tag s-pay">Waiting for Fee Payment</span>${owner?`<div>${payBox(a,"tnb")}</div>`:""}`;
+  if(st==="tnb_wl") return `<span class="tag s-verify">Pending Welcome Letter</span>${owner?`<div>${payBox(a,"tnb")}</div>`:""}`;
+  return `<span class="tag s-complete">Welcome Letter ✓ ${dt(a.wlAt)}</span>`;
+}
+function atapTag(a){ return atapCell(a,false); }
+function wlTag(a){ return tnbCell(a,false); }
 function billTags(a){
   const t=(st,l)=>{const n=refsOf(a,st).length; return n>1?`<span class="tag s-different">${l} billed ${n}×</span>`:n?`<span class="tag s-inv">${l} billed</span>`:"";};
-  return [t("atap","ATAP"),t("wl","Letter")].filter(Boolean).join(" ");
+  return [t("atap","ATAP"),t("wl","TNB")].filter(Boolean).join(" ");
 }
 function statusTag(a){
   if(a.invoiceNo) return `<span class="tag s-inv">Invoiced ${esc(a.invoiceNo)}</span>`;
-  return atapTag(a)+" "+wlTag(a);
+  return stepTag(a);
 }
 
 /* ---------- bulk import of already-completed applications ---------- */
@@ -449,7 +497,7 @@ function parseImport(text){
 function vImport(){
   const rows=S.imp; const ok=rows?rows.filter(r=>!r.errs.length):[];
   return `<div class="card"><h2>Import completed applications</h2>
-  <p class="muted" style="margin-top:-4px">For applications where <b>ATAP Application</b> and <b>TNB Welcome Letter</b> are both already done. They go straight to <b>Closed</b>, ready to invoice. Copy the rows from Excel and paste below — columns in this order:</p>
+  <p class="muted" style="margin-top:-4px">For applications where <b>ATAP Application</b> (approved) and <b>TNB Application</b> (Welcome Letter received) are both already done. They go straight to <b>Complete</b>, ready to invoice. Copy the rows from Excel and paste below — columns in this order:</p>
   <div style="overflow-x:auto;margin-bottom:10px"><table style="font-size:12px"><thead><tr><th>Name</th><th>Type</th><th>kWac</th><th>kWp</th><th>Date applied</th><th>TNB paid by</th><th>TNB amount</th></tr></thead>
   <tbody><tr><td>HENG CHOW LOON</td><td>Residential</td><td>6.5</td><td></td><td>13/10/2026</td><td>Apollon</td><td>10</td></tr>
   <tr><td>LINGJACK ENGINEERING</td><td>Commercial</td><td>96</td><td>120</td><td>02/11/2026</td><td>Apollon</td><td>920</td></tr></tbody></table>
@@ -469,7 +517,7 @@ async function runImport(){
   const ok=(S.imp||[]).filter(r=>!r.errs.length); if(!ok.length) return;
   const now=Date.now();
   const docs=ok.map(r=>({type:r.type,name:r.name,kwac:r.kwac,kwp:r.kwp||null,status:"complete",appliedKwac:r.kwac,appliedAt:r.date,appliedMonth:monthKey(r.date),
-    diffAck:false,adminNote:"",wlReceived:true,wlAt:r.date,tnbPaidBy:r.tnbPaidBy,tnbAmount:r.tnbAmount,createdAt:now,invoiceNo:null,imported:true}));
+    diffAck:false,adminNote:"",atapPaid:true,atapPaidAt:r.date,atapApproved:true,atapApprovedAt:r.date,tnbSubmitted:true,tnbSubmittedAt:r.date,tnbPaid:true,tnbPaidAt:r.date,wlReceived:true,wlAt:r.date,tnbPaidBy:r.tnbPaidBy,tnbAmount:r.tnbAmount,createdAt:now,invoiceNo:null,imported:true}));
   if(S.db.bulkAdd) await S.db.bulkAdd("apps",docs); else for(const d of docs) await S.db.collection("apps").add(d);
   S.imp=null; S.impText=""; render(); toast(`Imported ${docs.length} completed application${docs.length===1?"":"s"}`);
 }
@@ -495,11 +543,11 @@ function vNew(){
 }
 
 function appTable(list,actions=true){
-  return `<div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Applicant</th><th class="n">Keyed kWac</th><th class="n">Applied kWac</th><th>ATAP application</th><th>TNB welcome letter</th><th>TNB metering</th><th>Billing</th><th>Added</th>${actions?"<th></th>":""}</tr></thead><tbody>
-  ${list.map(a=>`<tr><td>${typeTag(a.type)}</td><td><b>${esc(a.name)}</b>${a.adminNote?`<div class="muted" style="font-size:12px">Note: ${esc(a.adminNote)}</div>`:""}${a.invoiceNo?`<div><span class="tag s-inv">Invoiced ${esc(a.invoiceNo)}</span></div>`:""}</td>
-  <td class="n">${a.kwac}</td><td class="n">${a.status==="pending"?"—":(a.appliedKwac??a.kwac)}</td><td>${atapTag(a)}</td><td>${wlTag(a)}</td>
+  return `<div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Applicant</th><th class="n">Keyed kWac</th><th class="n">Applied kWac</th><th>ATAP Application</th><th>TNB Application</th><th>TNB metering</th><th>Billing</th><th>Added</th>${actions?"<th></th>":""}</tr></thead><tbody>
+  ${list.map(a=>`<tr><td>${typeTag(a.type)}</td><td style="min-width:150px"><b>${esc(a.name)}</b>${a.adminNote?`<div class="muted" style="font-size:12px">Note: ${esc(a.adminNote)}</div>`:""}${a.invoiceNo?`<div><span class="tag s-inv">Invoiced ${esc(a.invoiceNo)}</span></div>`:""}</td>
+  <td class="n">${a.kwac}</td><td class="n">${a.status==="pending"?"—":(a.appliedKwac??a.kwac)}</td><td>${atapCell(a,actions&&S.isOwner)}</td><td>${tnbCell(a,actions&&S.isOwner)}</td>
   <td>${actions?tnbEditor(a):tnbLabel(a)}</td><td>${billTags(a)||'<span class="muted">—</span>'}</td>
-  <td class="muted">${a.createdAt?fmtDate(a.createdAt):""}</td>
+  <td class="muted" style="white-space:nowrap">${a.createdAt?fmtDate(a.createdAt):""}</td>
   ${actions?`<td style="white-space:nowrap">${a.status==="different"&&!a.diffAck?`<button class="btn sm warn" data-act="ack" data-id="${a.id}">Acknowledge</button> `:""}
    ${!a.invoiceNo?`<button class="btn sm ghost" data-act="edit" data-id="${a.id}">Edit</button> <button class="btn sm danger" data-act="del" data-id="${a.id}">Delete</button>`:""}</td>`:""}</tr>`).join("")}
   </tbody></table></div>`;
@@ -507,53 +555,70 @@ function appTable(list,actions=true){
 
 function vApps(){
   const f=S.appFilter;
-  const F={all:a=>true,atap:a=>!a.invoiceNo&&a.status==="pending",wl:a=>!a.invoiceNo&&a.status!=="pending"&&!a.wlReceived,
-    closed:a=>!a.invoiceNo&&closed(a),different:a=>a.status==="different",invoiced:a=>!!a.invoiceNo};
+  const st=k=>a=>!a.invoiceNo&&stage(a)===k;
+  const F={all:a=>true,topay:a=>!a.invoiceNo&&OWNER_STEPS.includes(stage(a)),atap_submit:st("atap_submit"),atap_verify:st("atap_verify"),
+    tnb_submit:st("tnb_submit"),tnb_wl:st("tnb_wl"),closed:st("closed"),different:a=>a.status==="different",invoiced:a=>!!a.invoiceNo};
   const list=S.apps.filter(F[f]||F.all);
-  return `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px"><h2 style="margin:0">All applications</h2>
-  <div class="seg" style="flex-wrap:wrap">${[["all","All"],["atap","Waiting ATAP"],["wl","Waiting letter"],["closed","Closed"],["different","Different kWac"],["invoiced","Invoiced"]].map(([k,l])=>`<button data-act="appFilter" data-v="${k}" class="${f===k?"on":""}">${l} (${S.apps.filter(F[k]).length})</button>`).join("")}</div></div>
+  const btns=[["all","All"],["topay","💰 Fees to pay"],["atap_submit","ATAP to submit"],["atap_verify","ATAP verifying"],["tnb_submit","TNB to submit"],["tnb_wl","Pending Welcome Letter"],["closed","Complete"],["different","Different kWac"],["invoiced","Invoiced"]];
+  return `<div class="card"><h2 style="margin:0 0 10px">All applications</h2>
+  <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">${btns.map(([k,l])=>`<button data-act="appFilter" data-v="${k}" class="${f===k?"on":""}">${l} (${S.apps.filter(F[k]).length})</button>`).join("")}</div>
+  ${f==="topay"?`<p class="muted" style="margin-top:-4px">Tick <b>Fee paid</b> once you've paid — the admin then sees it as <b>Waiting for Verification</b> (ATAP) or <b>Pending Welcome Letter</b> (TNB).</p>`:""}
   ${list.length?appTable(list):`<div class="empty">Nothing here.</div>`}</div>`;
 }
 
 function vQueue(){
   if(!S.appsLoaded) return `<div class="card empty">Loading…</div>`;
   const open=S.apps.filter(a=>!closed(a)&&!a.invoiceNo).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  const act=open.filter(a=>ADMIN_STEPS.includes(stage(a))), wait=open.filter(a=>OWNER_STEPS.includes(stage(a)));
   const done=S.apps.filter(a=>closed(a)||a.invoiceNo).sort((a,b)=>(b.wlAt||0)-(a.wlAt||0)).slice(0,15);
   const ro = S.canWrite===false && !S.isOwner;
-  const nA=open.filter(a=>a.status==="pending").length, nW=open.length-nA;
-  return `<div class="card"><h2>Open cases (${open.length}) <span class="muted" style="font-weight:400;font-size:13px">· ${nA} waiting ATAP · ${nW} waiting welcome letter</span></h2>
+  return `<div class="card"><h2>Needs your action (${act.length})</h2>
   ${ro?`<div class="note" style="margin-bottom:10px">You have view-only access. Ask the owner to give your account Admin access.</div>`:""}
-  <p class="muted" style="margin-top:-4px"><b>1. ATAP Application</b> — after submitting, tick whether the kWac you applied is the same as keyed in, then Save. <b>2. TNB Welcome Letter</b> — tick <b>Received</b> when it arrives. The case closes automatically once both are done.</p>
-  ${open.length?open.map(qItem).join(""):`<div class="empty">All caught up — no open cases.</div>`}</div>
-  <div class="card"><h2>Recently closed</h2>${done.length?`<div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Applicant</th><th class="n">Keyed</th><th class="n">Applied</th><th>ATAP</th><th>Welcome letter</th><th></th></tr></thead><tbody>
+  <p class="muted" style="margin-top:-4px"><b>ATAP Application:</b> submit → tick Same/Different kWac → (owner pays fee) → tick <b>Approved</b>. &nbsp;<b>TNB Application:</b> tick <b>Submitted</b> → (owner pays fee) → tick <b>Received Welcome Letter</b>. The case is complete after the Welcome Letter.</p>
+  ${act.length?act.map(qItem).join(""):`<div class="empty">All caught up — nothing for you to do right now.</div>`}</div>
+  <div class="card"><h2>Waiting for fee payment (${wait.length})</h2>
+  ${wait.length?wait.map(qItem).join(""):`<div class="empty">Nothing waiting for payment.</div>`}</div>
+  <div class="card"><h2>Recently completed</h2>${done.length?`<div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Applicant</th><th class="n">Keyed</th><th class="n">Applied</th><th>ATAP</th><th>TNB</th><th></th></tr></thead><tbody>
   ${done.map(a=>`<tr><td>${typeTag(a.type)}</td><td>${esc(a.name)}</td><td class="n">${a.kwac}</td><td class="n">${a.appliedKwac??a.kwac}</td><td>${atapTag(a)}</td><td>${wlTag(a)}</td>
   <td>${!a.invoiceNo&&!ro?`<button class="btn sm ghost" data-act="reopen" data-id="${a.id}">Undo</button>`:a.invoiceNo&&S.isOwner?`<span class="tag s-inv">Invoiced</span>`:""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">Nothing yet.</div>`}</div>`;
 }
 function qItem(a){
   const ro = S.canWrite===false && !S.isOwner;
-  const atapDone=a.status!=="pending";
+  const st=stage(a);
   const k=S.q["k_"+a.id];
   const akv=S.q["ak_"+a.id]??"";
   const kwOk = k==="same" || (k==="diff" && akv!=="" && num(akv)!==num(a.kwac));
   const opt=(val,label)=>`<button type="button" class="opt ${k===val?"on":""}" data-act="qPick" data-id="${a.id}" data-g="k" data-v="${val}" ${ro?"disabled":""}>${k===val?"●":"○"} ${label}</button>`;
-  const atapRow = atapDone
-    ? `<div class="actions" style="margin-top:0">${a.status==="complete"?`<span class="tag s-complete" style="font-size:12px">✓ Same kWac (${a.appliedKwac??a.kwac})</span>`:`<span class="tag s-different" style="font-size:12px">✓ Different kWac — applied ${a.appliedKwac}</span>`}
-       <span class="muted" style="font-size:12px">saved ${a.appliedAt?fmtDate(a.appliedAt):""}</span>${ro?"":`<button class="btn sm ghost" data-act="atapReset" data-id="${a.id}">Change</button>`}</div>`
-    : `<div class="actions" style="margin-top:0">${opt("same","Same kWac")}${opt("diff","Different kWac")}
-        ${k==="diff"?`<label class="chk muted" style="font-size:13px">Applied kWac <input type="number" id="ak_${a.id}" step="0.01" min="0" value="${esc(akv)}" style="width:100px"></label>
-        <input type="text" id="an_${a.id}" value="${esc(S.q["an_"+a.id]??"")}" placeholder="Reason (optional)" style="flex:1;min-width:160px">`:""}
-        <button class="btn green sm" data-act="atapSave" data-id="${a.id}" ${!kwOk||ro?"disabled":""}>Save</button></div>`;
+  const box=(field,label,checked,dis)=>`<label class="chk"><input type="checkbox" data-step="${field}" data-id="${a.id}" ${checked?"checked":""} ${ro||dis?"disabled":""}> ${label}</label>`;
+  const chip=(t,c)=>`<span class="tag ${c}" style="font-size:12px">${t}</span>`;
+  const kwInfo = a.status==="complete"?`Same kWac (${a.appliedKwac??a.kwac})`:a.status==="different"?`Different kWac — applied ${a.appliedKwac}`:"";
+  let atapRow;
+  if(st==="atap_submit"){
+    atapRow=`<div class="actions" style="margin-top:0">${opt("same","Same kWac")}${opt("diff","Different kWac")}
+      ${k==="diff"?`<label class="chk muted" style="font-size:13px">Applied kWac <input type="number" id="ak_${a.id}" step="0.01" min="0" value="${esc(akv)}" style="width:100px"></label>
+      <input type="text" id="an_${a.id}" value="${esc(S.q["an_"+a.id]??"")}" placeholder="Reason (optional)" style="flex:1;min-width:160px">`:""}
+      <button class="btn green sm" data-act="atapSave" data-id="${a.id}" ${!kwOk||ro?"disabled":""}>Submitted</button></div>`;
+  } else {
+    const parts=[chip("✓ Submitted · "+kwInfo, a.status==="different"?"s-different":"s-complete"),`<span class="muted" style="font-size:12px">${dt(a.appliedAt)}</span>`];
+    if(st==="atap_pay"){ parts.push(chip("Waiting for Fee Payment","s-pay")); if(!ro) parts.push(`<button class="btn sm ghost" data-act="atapReset" data-id="${a.id}">Change</button>`); }
+    else if(st==="atap_verify"){ parts.push(chip("Waiting for Verification","s-verify")); parts.push(box("atapApproved","Approved",false,false)); }
+    else parts.push(box("atapApproved",`Approved ${dt(a.atapApprovedAt)}`,true,flag(a,"tnbSubmitted")));
+    atapRow=`<div class="actions" style="margin-top:0">${parts.join("")}</div>`;
+  }
+  let tnbRow;
+  if(["atap_submit","atap_pay","atap_verify"].includes(st)) tnbRow=`<span class="muted" style="font-size:12px">Available after ATAP is approved</span>`;
+  else if(st==="tnb_submit") tnbRow=box("tnbSubmitted","Submitted",false,false);
+  else if(st==="tnb_pay") tnbRow=`${box("tnbSubmitted",`Submitted ${dt(a.tnbSubmittedAt)}`,true,false)} ${chip("Waiting for Fee Payment","s-pay")}`;
+  else tnbRow=`${chip("✓ Submitted "+dt(a.tnbSubmittedAt),"s-complete")} ${chip("Pending Welcome Letter","s-verify")} ${box("wlReceived","Received Welcome Letter",false,false)}`;
   return `<div class="qitem" data-q="${a.id}">
-    <div class="top">${typeTag(a.type)}<span class="name">${esc(a.name)}</span><span class="muted">Keyed in: <b style="color:var(--ink)">${a.kwac} kWac</b>${a.kwp?` · ${a.kwp} kWp`:""}</span><span class="muted" style="margin-left:auto;font-size:12px">Added ${a.createdAt?fmtDate(a.createdAt):""}</span></div>
+    <div class="top">${typeTag(a.type)}<span class="name">${esc(a.name)}</span><span class="muted">Keyed in: <b style="color:var(--ink)">${a.kwac} kWac</b>${a.kwp?` · ${a.kwp} kWp`:""}</span><span class="muted" style="margin-left:auto;font-size:12px">Added ${dt(a.createdAt)}</span></div>
     <div class="qgrid">
       <div class="qlbl">1. ATAP Application</div>${atapRow}
-      <div class="qlbl">2. TNB Welcome Letter</div>
-      <div class="actions" style="margin-top:0"><label class="chk" ${!atapDone?'title="Save the ATAP Application first"':""}><input type="checkbox" data-wl="${a.id}" ${a.wlReceived?"checked":""} ${ro||!atapDone?"disabled":""}> Received</label>
-        ${!atapDone?`<span class="muted" style="font-size:12px">Available after ATAP Application is saved</span>`:""}</div>
+      <div class="qlbl">2. TNB Application</div><div class="actions" style="margin-top:0">${tnbRow}</div>
     </div>
   </div>`;
 }
-function closed(a){ return (a.status==="complete"||a.status==="different") && !!a.wlReceived; }
+function closed(a){ return stage(a)==="closed"; }
 function eligible(){ return S.apps.filter(a=>closed(a)&&(S.showInvoiced||!a.invoiceNo)); }
 /* invoice number: INVYYMM-XXXX, XXXX restarts every month */
 const todayStr=()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
@@ -614,7 +679,7 @@ function billedTag(a,st){
   return refs.length>1?`<span class="tag s-different">Billed ${refs.length}× ⚠</span><div class="muted" style="font-size:11px;margin-top:3px">${t}</div>`
     :`<span class="tag s-complete">Billed</span><div class="muted" style="font-size:11px;margin-top:3px">${t}</div>`;
 }
-const STAGE={atap:"ATAP Application",wl:"TNB Welcome Letter"};
+const STAGE={atap:"ATAP Application",wl:"TNB Application"};
 function stageBase(st){ return S.apps.filter(a=>st==="wl"?!!a.wlReceived:a.status!=="pending"); }
 function stageAmt(a,st){ return num(st==="wl"?S.cfg.billWl:S.cfg.billAtap); }
 function vBilling(){
@@ -635,7 +700,7 @@ function vBilling(){
   return `${dups.length?`<div class="alert"><b>⚠ Billed more than once (${dups.length})</b><br>${dups.map(a=>["atap","wl"].filter(x=>refsOf(a,x).length>1).map(x=>`${esc(a.name)} — ${STAGE[x]}: ${refsOf(a,x).map(r=>esc(r.ref||"no ref")).join(", ")}`).join("<br>")).join("<br>")}</div>`:""}
   <div class="card"><h2>Billing check — tick what the admin has billed you for</h2>
   <div style="margin-bottom:12px"><div class="seg">${["atap","wl"].map(k=>`<button data-act="bStage" data-v="${k}" class="${st===k?"on":""}">${k==="atap"?"1 · ":"2 · "}${STAGE[k]} billing</button>`).join("")}</div></div>
-  <p class="muted" style="margin-top:-4px">She bills twice per applicant: <b>RM${money(S.cfg.billAtap)}</b> after the <b>ATAP Application</b> and <b>RM${money(S.cfg.billWl)}</b> after the <b>TNB Welcome Letter</b>. Pick the stage on her invoice, tick the applicants on it, enter her invoice number and press <b>Mark as billed</b>. Double billing within the same stage is flagged before saving. ${nb} application${nb===1?"":"s"} not billed for this stage yet.</p>
+  <p class="muted" style="margin-top:-4px">She bills twice per applicant: <b>RM${money(S.cfg.billAtap)}</b> after the <b>ATAP Application</b> and <b>RM${money(S.cfg.billWl)}</b> after the <b>TNB Application</b> (Welcome Letter received). Pick the stage on her invoice, tick the applicants on it, enter her invoice number and press <b>Mark as billed</b>. Double billing within the same stage is flagged before saving. ${nb} application${nb===1?"":"s"} not billed for this stage yet.</p>
   <div class="row" style="margin-bottom:12px">
     <label class="f">${st==="wl"?"Letter received in":"ATAP applied in"}<select id="bMonth"><option value="all">All months</option>${months.map(m=>`<option value="${m}" ${S.bMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("")}</select></label>
     <label class="f">Show<select id="bShow">${[["unbilled","Not billed yet"],["billed","Already billed"],["all","All"]].map(([k,l])=>`<option value="${k}" ${S.bShow===k?"selected":""}>${l}</option>`).join("")}</select></label>
@@ -693,7 +758,7 @@ function vSettings(){
   </div></div>
   <div class="card"><h2>Admin's charges to you (Billing check)</h2>
     <div class="row"><label class="f">Per applicant after ATAP Application (RM)<input type="number" step="0.01" id="sBillAtap" value="${c.billAtap}"></label>
-    <label class="f">Per applicant after TNB Welcome Letter (RM)<input type="number" step="0.01" id="sBillWl" value="${c.billWl}"></label></div></div>
+    <label class="f">Per applicant after TNB Application (RM)<input type="number" step="0.01" id="sBillWl" value="${c.billWl}"></label></div></div>
   <div class="card"><h2>Invoice details</h2><div class="grid2"><div>
     <label class="f">Company name<input type="text" id="sIssuer" value="${esc(c.issuerName)}"></label>
     <label class="f" style="margin-top:10px">Registration no.<input type="text" id="sReg" value="${esc(c.issuerReg)}"></label>
@@ -722,7 +787,7 @@ document.addEventListener("click",async e=>{
     case "logout": await sb.auth.signOut(); location.reload(); break;
     case "impPreview": S.impText=$("#impText").value; S.imp=parseImport(S.impText); if(!S.imp.length) toast("Nothing to import — paste rows first"); render(); break;
     case "impClear": S.imp=null; S.impText=""; render(); break;
-    case "impGo": { const n=(S.imp||[]).filter(r=>!r.errs.length).length; if(await ask(`Import ${n} application${n===1?"":"s"}?`,"They'll be added as closed cases (ATAP done, Welcome Letter received), ready to invoice.","Import")) await runImport(); break; }
+    case "impGo": { const n=(S.imp||[]).filter(r=>!r.errs.length).length; if(await ask(`Import ${n} application${n===1?"":"s"}?`,"They'll be added as complete (ATAP approved, Welcome Letter received), ready to invoice.","Import")) await runImport(); break; }
     case "bClear": S.bSel.clear(); render(); break;
     case "bStage": S.bStage=t.dataset.v; S.bSel.clear(); S.bMonth="all"; render(); break;
     case "unbill": if(await ask("Unmark as billed?",`Remove the ${STAGE[S.bStage||"atap"]} billing marks from <b>${esc(a.name)}</b>?`,"Unmark")){ await ref.update((S.bStage||"atap")==="wl"?{billedWl:[]}:{billedAtap:[],billedRefs:[]}); toast("Unmarked"); } break;
@@ -735,9 +800,9 @@ document.addEventListener("click",async e=>{
       const now=Date.now();
       await ref.update({status:k==="diff"?"different":"complete",appliedKwac:ak,appliedAt:now,appliedMonth:monthKey(now),diffAck:false,adminNote:k==="diff"?(S.q["an_"+id]||"").trim():""});
       ["k_","ak_","an_"].forEach(x=>delete S.q[x+id]);
-      toast(k==="diff"?"ATAP saved — owner has been alerted":"ATAP saved"); break; }
-    case "atapReset": if(await ask("Change ATAP answer?",`Clear the saved ATAP answer for <b>${esc(a.name)}</b>?`,"Change")){ await ref.update({status:"pending",appliedKwac:null,appliedAt:null,appliedMonth:null,diffAck:false,adminNote:"",wlReceived:false,wlAt:null}); } break;
-    case "reopen": if(await ask("Reopen case?",`<b>${esc(a.name)}</b> goes back to open cases with the welcome letter unticked.`,"Reopen")){ await ref.update({wlReceived:false,wlAt:null}); } break;
+      toast(k==="diff"?"ATAP submitted — owner alerted about the kWac difference":"ATAP submitted — waiting for fee payment"); break; }
+    case "atapReset": if(await ask("Change ATAP answer?",`Clear the ATAP submission for <b>${esc(a.name)}</b>?`,"Change")){ await ref.update({status:"pending",appliedKwac:null,appliedAt:null,appliedMonth:null,diffAck:false,adminNote:""}); } break;
+    case "reopen": if(await ask("Reopen case?",`<b>${esc(a.name)}</b> goes back to Pending Welcome Letter.`,"Reopen")){ await ref.update({wlReceived:false,wlAt:null}); } break;
     case "selMonth": eligible().filter(x=>x.appliedMonth===S.invMonth).forEach(x=>S.sel.add(x.id)); render(); break;
     case "clearSel": S.sel.clear(); render(); break;
     case "preview": { const inv=buildDraft(); modal(`<h3>Preview — ${esc(inv.no)}</h3>${invoiceHTML(inv)}<div class="btns"><button class="btn ghost" onclick="closeModal()">Close</button></div>`,{wide:true}); break; }
@@ -760,7 +825,13 @@ document.addEventListener("change",e=>{
   if(t.dataset.role){ sb.from("profiles").update({role:t.value}).eq("id",t.dataset.role).then(({error})=>{ if(error){toast("Couldn't change role");console.error(error);} else toast("Access updated"); loadUsers(); }); return; }
   if(t.dataset.tnbsel){ S.db.collection("apps").doc(t.dataset.tnbsel).update({tnbPaidBy:t.value}).then(()=>toast("TNB metering updated")).catch(dbErr); return; }
   if(t.dataset.tnbamt){ if(t.value===""){toast("Enter an amount");return} S.db.collection("apps").doc(t.dataset.tnbamt).update({tnbAmount:num(t.value)}).then(()=>toast("TNB amount saved")).catch(dbErr); return; }
-  if(t.dataset.wl){ const now=Date.now(); S.db.collection("apps").doc(t.dataset.wl).update(t.checked?{wlReceived:true,wlAt:now}:{wlReceived:false,wlAt:null}).then(()=>toast(t.checked?"Welcome letter received — case closed":"Unticked")).catch(dbErr); return; }
+  if(t.dataset.step||t.dataset.pay){
+    const field=t.dataset.step || (t.dataset.pay==="atap"?"atapPaid":"tnbPaid");
+    const atField={atapApproved:"atapApprovedAt",tnbSubmitted:"tnbSubmittedAt",wlReceived:"wlAt",atapPaid:"atapPaidAt",tnbPaid:"tnbPaidAt"}[field];
+    const msg={atapApproved:"ATAP approved — TNB Application can start",tnbSubmitted:"TNB Application submitted — waiting for fee payment",wlReceived:"Welcome Letter received — case complete",
+      atapPaid:"ATAP fee paid — admin will see Waiting for Verification",tnbPaid:"TNB fee paid — admin will see Pending Welcome Letter"}[field];
+    S.db.collection("apps").doc(t.dataset.id).update({[field]:t.checked,[atField]:t.checked?Date.now():null})
+      .then(()=>toast(t.checked?msg:"Unticked")).catch(dbErr); return; }
   if(t.dataset.bsel){ t.checked?S.bSel.add(t.dataset.bsel):S.bSel.delete(t.dataset.bsel); render(); return; }
   if(t.id==="bAll"){ [...document.querySelectorAll("[data-bsel]")].forEach(x=>t.checked?S.bSel.add(x.dataset.bsel):S.bSel.delete(x.dataset.bsel)); render(); return; }
   if(t.id==="bMonth"){ S.bMonth=t.value; render(); return; }
