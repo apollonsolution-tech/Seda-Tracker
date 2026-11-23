@@ -173,7 +173,7 @@ const DEF = {
 const S = {db:null,user:null,isOwner:false,canWrite:null,apps:[],cfg:{...DEF},invoices:[],
   tab:null, appsLoaded:false, offline:false,
   newType:"residential", diffOpen:{}, sel:new Set(), invMonth:"all", showInvoiced:false, invSearch:"",
-  appFilter:"all", draft:null, imp:null, impText:"", bSel:new Set(), bMonth:"all", bShow:"unbilled", bStage:"atap", bSearch:"", bRef:"", q:{}, setDirty:false};
+  appFilter:"all", appSearch:"", draft:null, imp:null, impText:"", bSel:new Set(), bMonth:"all", bShow:"unbilled", bStage:"atap", bSearch:"", bRef:"", q:{}, setDirty:false};
 
 /* ---------- helpers ---------- */
 const $ = s=>document.querySelector(s);
@@ -554,10 +554,10 @@ function appTable(list,actions=true){
   <td class="n">${a.kwac}</td><td class="n">${a.status==="pending"?"—":(a.appliedKwac??a.kwac)}</td><td>${atapCell(a,actions&&S.isOwner)}</td><td>${tnbCell(a,actions&&S.isOwner)}</td>
   <td>${actions?tnbEditor(a):tnbLabel(a)}</td><td>${billTags(a)||'<span class="muted">—</span>'}</td>
   <td class="muted" style="white-space:nowrap">${a.createdAt?fmtDate(a.createdAt):""}</td>
-  ${actions?`<td style="white-space:nowrap">${a.status==="different"&&!a.diffAck?`<button class="btn sm warn" data-act="ack" data-id="${a.id}">Acknowledge</button> `:""}
+  ${actions?`<td><div style="display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;min-width:150px">${a.status==="different"&&!a.diffAck?`<button class="btn sm warn" data-act="ack" data-id="${a.id}">Acknowledge</button> `:""}
    ${closed(a)&&S.isOwner?`<button class="btn sm" data-act="cccApp" data-id="${a.id}" style="background:#7a5a00;border-color:#7a5a00">CCC Application</button> `:""}
    ${isCCC(a)&&stage(a)==="atap_submit"&&(a.rounds||[]).length&&S.isOwner?`<button class="btn sm ghost" data-act="cccUndo" data-id="${a.id}">Cancel CCC</button> `:""}
-   ${!a.invoiceNo?`<button class="btn sm ghost" data-act="edit" data-id="${a.id}">Edit</button> <button class="btn sm danger" data-act="del" data-id="${a.id}">Delete</button>`:""}</td>`:""}</tr>`).join("")}
+   ${!a.invoiceNo?`<button class="btn sm ghost" data-act="edit" data-id="${a.id}">Edit</button> <button class="btn sm danger" data-act="del" data-id="${a.id}">Delete</button>`:""}</div></td>`:""}</tr>`).join("")}
   </tbody></table></div>`;
 }
 
@@ -566,13 +566,18 @@ function vApps(){
   const st=k=>a=>!a.invoiceNo&&stage(a)===k;
   const F={all:a=>true,topay:a=>!a.invoiceNo&&OWNER_STEPS.includes(stage(a)),atap_submit:st("atap_submit"),atap_verify:st("atap_verify"),
     tnb_submit:st("tnb_submit"),tnb_wl:st("tnb_wl"),closed:st("closed"),ccc:a=>isCCC(a),different:a=>a.status==="different",invoiced:a=>!!a.invoiceNo};
-  const list=S.apps.filter(F[f]||F.all);
+  const qy=S.appSearch.trim().toLowerCase();
+  const match=a=>!qy||a.name.toLowerCase().includes(qy);
+  const list=S.apps.filter(a=>match(a)&&(F[f]||F.all)(a));
   const btns=[["all","All"],["topay","💰 Fees to pay"],["atap_submit","ATAP to submit"],["atap_verify","ATAP verifying"],["tnb_submit","TNB to submit"],["tnb_wl","Pending Welcome Letter"],["closed","Complete"],["ccc","CCC Application"],["different","Different kWac"],["invoiced","Invoiced"]];
-  return `<div class="card"><h2 style="margin:0 0 10px">All applications</h2>
-  <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">${btns.map(([k,l])=>`<button data-act="appFilter" data-v="${k}" class="${f===k?"on":""}">${l} (${S.apps.filter(F[k]).length})</button>`).join("")}</div>
+  return `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px"><h2 style="margin:0">All applications</h2>
+  <div style="position:relative;flex:0 1 360px;min-width:220px"><input type="text" id="appSearch" value="${esc(S.appSearch)}" placeholder="🔍 Search applicant name" autocomplete="off" style="width:100%;padding-right:30px">
+  ${qy?`<button data-act="appSearchClear" title="Clear" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:none;font-size:16px;cursor:pointer;color:var(--muted)">✕</button>`:""}</div></div>
+  <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">${btns.map(([k,l])=>`<button data-act="appFilter" data-v="${k}" class="${f===k?"on":""}">${l} (${S.apps.filter(a=>match(a)&&F[k](a)).length})</button>`).join("")}</div>
+  ${qy?`<p class="muted" style="margin-top:-4px">${list.length} match${list.length===1?"":"es"} for "<b>${esc(S.appSearch.trim())}</b>" in this tab · the counts above show matches in every tab.</p>`:""}
   ${f==="closed"?`<p class="muted" style="margin-top:-4px">Press <b>CCC Application</b> on a case to send it back through ATAP Application and TNB Application for CCC.</p>`:""}
   ${f==="topay"?`<p class="muted" style="margin-top:-4px">Tick <b>Fee paid</b> once you've paid — the admin then sees it as <b>Waiting for Verification</b> (ATAP) or <b>Pending Welcome Letter</b> (TNB).</p>`:""}
-  ${list.length?appTable(list):`<div class="empty">Nothing here.</div>`}</div>`;
+  ${list.length?appTable(list):`<div class="empty">${qy?"No applicant matches in this tab — check the counts above or pick All.":"Nothing here."}</div>`}</div>`;
 }
 
 function vQueue(){
@@ -790,6 +795,7 @@ document.addEventListener("click",async e=>{
   switch(act){
     case "setType": S.newType=t.dataset.v; render(); break;
     case "gotoApps": S.tab="apps"; S.appFilter="different"; render(); break;
+    case "appSearchClear": S.appSearch=""; render(); $("#appSearch")&&$("#appSearch").focus(); break;
     case "appFilter": S.appFilter=t.dataset.v; render(); break;
     case "ack": await ref.update({diffAck:true}); toast("Noted"); break;
     case "del": if(await ask("Delete application?",`Remove <b>${esc(a.name)}</b>? This can't be undone.`,"Delete",true)){ await ref.delete(); toast("Deleted"); } break;
@@ -871,6 +877,7 @@ document.addEventListener("input",e=>{ const id=e.target.id||"";
   if(e.target.closest&&e.target.closest("#setForm")) S.setDirty=true;
   if(/^(pt|ak|an)_/.test(id)){ S.q[id]=e.target.value; if(/^ak_/.test(id)) render(); }
   if(id==="bRef") S.bRef=e.target.value;
+  if(id==="appSearch"){ S.appSearch=e.target.value; render(); }
   if(id==="impText") S.impText=e.target.value;
   if(id==="bSearch"){ S.bSearch=e.target.value; render(); }
   if(e.target.id==="invSearch"){ S.invSearch=e.target.value; saveDraft(); render(); } });
